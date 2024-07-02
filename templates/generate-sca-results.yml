@@ -1,0 +1,222 @@
+# This Python script runs an API request to get Dependency scan results, 
+# and then formats it using HTML to output to whatever pipeline system needed.
+# This can be used with AzureDevOps, Jenkins, and more.
+
+parameters:
+  - name: 'url'
+    default: ''
+  - name: 'orgUuid'
+    default: ''
+  - name: 'userKey'
+    default: ''
+  - name: 'email'
+    default: ''
+  - name: 'projectToken'
+    default: ''
+  - name: 'scanToken'
+    default: ''
+
+steps:
+  # Make sure the appropriate python version is installed.
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.10'
+      addToPath: true
+      architecture: 'x64'
+
+  # Install dependencies for our script.
+  - script: |
+      ### Install Python Pre-requisites
+      pip install requests
+
+  # Run the python script
+  - task: PythonScript@0
+    displayName: 'Generate Markdown for SCA Results'
+    env:
+      MEND_URL: ${{ parameters.url }}
+      MEND_ORG_TOKEN: ${{ parameters.orgUuid }}
+      MEND_USER_KEY: ${{ parameters.userKey }}
+      MEND_EMAIL: ${{ parameters.email }}
+      MEND_PROJECTTOKEN: ${{ parameters.projectToken }}
+      MEND_SCANTOKEN: ${{parameters.scanToken}}
+
+    inputs: 
+      scriptSource: 'inline'
+      script: |
+        import requests
+        import json
+        import re
+        import os
+
+        # Load Environment variables
+        MEND_URL = os.getenv("MEND_URL")
+        MEND_USER_KEY = os.getenv("MEND_USER_KEY")
+        MEND_EMAIL = os.getenv("MEND_EMAIL")
+        MEND_ORG_TOKEN = os.getenv("MEND_ORG_TOKEN")
+        MEND_PROJECTTOKEN = os.getenv("MEND_PROJECTTOKEN")
+        MEND_SCANTOKEN = os.getenv("MEND_SCANTOKEN")
+
+        HEADERS = {"Content-Type": "application/json"}
+
+        # Login with API 3.0
+        def api3Login() -> str:
+          global MEND_URL
+          global MEND_USER_KEY
+          global MEND_EMAIL
+          global MEND_ORG_TOKEN
+          global HEADERS
+
+          login_request_body = {"email": MEND_EMAIL, "userKey": MEND_USER_KEY}
+
+          if MEND_ORG_TOKEN != "":
+            login_request_body["orgUuid"] = MEND_ORG_TOKEN
+
+        #Get our refresh token and then use that to login
+          refreshToken_response = json.loads(
+            requests.post(
+              f"{MEND_URL}/api/v3.0/login",
+              headers=HEADERS,
+              data=json.dumps(login_request_body),
+            ).content
+          )
+
+          refreshToken = refreshToken_response["response"]["refreshToken"]
+
+          HEADERS["wss-refresh-token"] = refreshToken
+
+          jwtToken_response = json.loads(
+            requests.post(
+              f"{MEND_URL}/api/v3.0/login/accessToken", headers=HEADERS, data="{}"
+            ).content
+          )
+
+          jwtToken = jwtToken_response["response"]["jwtToken"]
+          del HEADERS["wss-refresh-token"]
+          return jwtToken
+
+
+        # This method is used to get the root libraries with the associated number of vulnerabilities.
+        def getResults() -> dict:
+          global MEND_URL
+          global MEND_PROJECTTOKEN
+          global HEADERS
+
+          response = {
+            "additionalData": {
+              "paging": {
+                "next": f"{MEND_URL}/api/v3.0/projects/{MEND_PROJECTTOKEN}/dependencies/findings/security/groupBy/rootLibrary"
+              }
+            }
+          }
+          data = {"alerts": []}
+
+          while len(response["additionalData"]["paging"]) != 0:
+            currentUrl = response["additionalData"]["paging"]["next"]
+            response = json.loads(requests.get(currentUrl, headers=HEADERS).content)
+            data["alerts"].extend(response["response"])
+
+          return data
+
+        # Converts data taken from "getResults" and convert it to HTML/Markdown
+        def convertToMarkdown(alerts: dict) -> str:
+          global MEND_SCANTOKEN
+
+          critical_alert_url = (
+            "https://whitesource-resources.whitesourcesoftware.com/critical_vul.png?"
+          )
+          high_alert_url = (
+            "https://whitesource-resources.whitesourcesoftware.com/high_vul.png?"
+          )
+          medium_alert_url = (
+            "https://whitesource-resources.whitesourcesoftware.com/medium_vul.png?"
+          )
+          low_alert_url = "https://whitesource-resources.whitesourcesoftware.com/low_vul.png?"
+
+          border_style = "border:1px solid;"
+          padding_style = "padding:15px"
+
+          markdown = ""
+          if len(alerts["alerts"]) == 0:
+            markdown += "Congratulations! The Mend Scan did not find any vulnerabilities in your project."
+            markdown += f"<br />Scan Token: {MEND_SCANTOKEN}"
+            return markdown
+
+          totalVulnerabilities = 0
+          for library in alerts["alerts"]:
+            totalVulnerabilities += int(library["total"])
+
+          # This is used to create a collapsible section
+          markdown += "<details><summary>"
+          markdown += f"The scan has finished and found {totalVulnerabilities} vulnerabilities in your project. Expand this tab to see the results."
+          markdown += "</summary>"
+          # Start creating a table with our results.
+          markdown += '<table style="margin-top:20px;margin-bottom:20px;margin-left:100px;margin-right:100px;border:2px solid;border-collapse:collapse;">'
+          markdown += f'<thead style="padding-top:8px;padding-bottom:8px;{border_style}">'
+          markdown += f'<tr style="{border_style}">'
+          markdown += f'<th style="{border_style}{padding_style}">Library</th>'
+          markdown += f'<th style="{border_style}{padding_style}">Severities</th>'
+          markdown += f'<th style="text-align:left;{border_style}{padding_style}">Suggested Fix</th></tr>'
+          markdown += "</thead><tbody>"
+
+          for alert in alerts["alerts"]:
+            print(alert)
+            fix_version = (
+              "You are already using the minor least vulnerable package"
+              if alert["recommendedFix"] == alert["rootLibraryVersion"]
+              else f"Upgrade to version: {alert['recommendedFix']}"
+            )
+
+            severities_cell = ""
+            if alert["criticalNum"] > 0:
+              severities_cell += f'<img src="{critical_alert_url}" width="19" height="20"> CRITICAL: {alert["criticalNum"]}<br />'
+            if alert["highNum"] > 0:
+              severities_cell += f'<img src="{high_alert_url}" width="19" height="20"> HIGH: {alert["highNum"]}<br />'
+            if alert["mediumNum"] > 0:
+              severities_cell += f'<img src="{medium_alert_url}" width="19" height="20"> MEDIUM: {alert["mediumNum"]}<br />'
+            if alert["lowNum"] > 0:
+              severities_cell += f'<img src="{low_alert_url}" width="19" height="20"> LOW: {alert["lowNum"]}<br />'
+
+            markdown += f"""<tr style=\"{border_style}\">
+              <td style=\"{border_style}{padding_style}\"><details><summary>{alert['rootLibraryName']}</summary><p dir=\"auto\">Path to dependency file: {alert['path']}</p></td>
+              <td style=\"{border_style}{padding_style}\">{severities_cell}</td>
+              <td style=\"{border_style}{padding_style}\">{fix_version}</td>
+            </tr>"""
+
+          markdown += "</tbody></table>"
+          markdown += "</details>"
+
+          markdown += f"<br />Scan Token: {MEND_SCANTOKEN}"
+          return markdown
+
+
+        def main():
+          global MEND_URL
+          global HEADERS
+
+          MEND_URL = re.sub(r"^(.*?)(saas|app)(.*)", r"\1api-\2\3", MEND_URL, 1)
+
+          jwtToken = api3Login()
+
+          HEADERS["Authorization"] = f"Bearer {jwtToken}"
+
+          results = getResults()
+          markdown = convertToMarkdown(results)
+
+          with open("Dependency Scan Results.md", "w") as file:
+            file.write(markdown)
+
+
+        if __name__ == "__main__":
+            main()
+
+  # After running our python script and writing to "Dependency Scan Results.md" 
+  # then upload it as a summary which will appear in the Extensions tab.
+  - script: |
+      echo "##vso[task.uploadsummary]$(System.DefaultWorkingDirectory)/Dependency Scan Results.md"
+
+  # Publish the file as an artifact
+  - publish: $(System.DefaultWorkingDirectory)/Dependency Scan Results.md
+    artifact: dependency-scan-results
+    condition: succeededOrFailed()
+    displayName: 'Publish Dependency Scan Results'
+

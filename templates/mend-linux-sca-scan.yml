@@ -1,0 +1,55 @@
+# This is a template to run a Mend SCA scan with the CLI.
+# After the scan, it sets Pipeline level environment variables that provide later steps with the Project token and Scan Token.
+
+parameters:
+  - name: appName
+    default: ''
+  - name: projectName
+    default: ''
+
+steps:
+  - script: |
+      ### Check and install CLI
+      mend -h > /dev/null 2>&1
+      if [ $? -eq 127 ]; then
+      echo "Downloading Mend CLI"
+      curl https://downloads.mend.io/cli/linux_amd64/mend -o /usr/local/bin/mend && chmod +x /usr/local/bin/mend
+      fi
+
+      echo Running Mend SCA Scan
+      mkdir dep-results
+      # Run the Mend Scan
+      mend dep -u -s "*//${{ parameters.appName }}//${{ parameters.projectName }}" --fail-policy --non-interactive | tee scan_results.md
+
+      export dep_exit=$?
+
+      # Extract the Scan token and project token from the scan results
+      SCAN_TOKEN=$(cat scan_results.md | grep "Support token" | sed -n 's/^.*: //p')
+      PROJECT_TOKEN=$(cat scan_results.md | grep "project=" | sed -n 's/^.*project=//p')
+      rm scan_results.md
+
+      echo "##vso[task.setvariable variable=MEND_PROJECTTOKEN;]$PROJECT_TOKEN"
+      echo "##vso[task.setvariable variable=MEND_SCAN_TOKEN;]$SCAN_TOKEN"
+
+      ### Moving Mend Logs ###
+      mv ~/.mend/logs $(System.DefaultWorkingDirectory)
+      mv *results* $(System.DefaultWorkingDirectory)/logs/
+
+      # Check if there is a policy violation, and if there is, log it appropriately.
+      if [[ "$dep_exit" == "9" ]]; then
+        echo "##vso[task.logissue type=warning;] Dependency scan policy violation"
+        echo "##vso[task.complete result=SucceededWithIssues;]"
+      else
+        echo "No policy violations found in dependencies scan"
+      fi
+
+    env:
+      MEND_EMAIL: $(MENDEMAIL)
+      MEND_USER_KEY: $(MENDUSERKEY)
+    displayName: 'Mend CLI SCA Scan'
+
+  ### Generate MEND SCA post-scan reports
+  - publish: $(System.DefaultWorkingDirectory)/logs
+    artifact: mend-logs-report
+    condition: succeededOrFailed()
+    displayName: 'Publish Mend scan logs'

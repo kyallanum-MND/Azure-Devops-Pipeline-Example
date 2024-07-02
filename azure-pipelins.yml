@@ -1,0 +1,58 @@
+name: 'mend-sca-scan'
+
+trigger:
+  - main
+  - v*
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: Mend-Templates/Mend-Templates
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - name: MEND_URL
+    value: https://saas.mend.io
+
+jobs:
+  - job: BuildOnMain
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    steps:
+      # Make sure the appropriate Java Version is installed.
+      - task: JavaToolInstaller@0
+        inputs:
+          versionSpec: '17'
+          jdkArchitectureOption: 'x64'
+          jdkSourceOption: 'PreInstalled'
+      # Build our project. For this we used: https://github.com/WebGoat/WebGoat
+      - task: Maven@4
+        inputs:
+          mavenPomFile: 'pom.xml'
+          # Skip tests because they don't add any extra scan information.
+          goals: 'clean install -DskipTests=true'
+          publishJUnitResults: false
+          javaHomeOption: 'Path'
+          jdkDirectory: '/usr/lib/jvm/temurin-17-jdk-amd64'
+          mavenVersionOption: 'Default'
+          mavenAuthenticateFeed: false
+          effectivePomSkip: false
+          sonarQubeRunAnalysis: false
+      # Run a Mend SCA scan with the Mend CLI.
+      - template: mend-linux-sca-scan.yml@templates
+        parameters:
+          appName: $(System.TeamProject)
+          projectName: $(Build.Repository.Name)_$(Build.SourceBranchName)
+          
+      # Generate Markdown for the Extensions tab.
+      - template: mend-resources/generate-sca-results.yml@templates
+        parameters:
+          url: $(MEND_URL)
+          orgUuid: $(MEND_ORG_TOKEN)
+          userKey: $(MEND_USER_KEY)
+          email: $(MEND_EMAIL)
+          # $MEND_PROJECTTOKEN and $MEND_SCAN_TOKEN are generated from the mend-linux-sca-scan.yml template.
+          projectToken: $(MEND_PROJECTTOKEN)
+          scanToken: $(MEND_SCAN_TOKEN)
